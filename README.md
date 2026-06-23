@@ -7,7 +7,7 @@ Five cognitive levels (L1→L5) + Confidence-gated Early Exit + Tool awareness +
 ## Quick Start
 
 ```bash
-git clone https://github.com/<your-org>/OxygenDynamicCognition.skill.git
+git clone https://github.com/StarsailsClover/OxygenDynamicCognition.skill.git
 cd OxygenDynamicCognition.skill
 pip install openai
 python scripts/odc_agent.py "Explain quantum entanglement"
