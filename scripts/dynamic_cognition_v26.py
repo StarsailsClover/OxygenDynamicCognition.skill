@@ -28,6 +28,11 @@ from dataclasses import dataclass, field
 from typing import Optional, List, Dict, Tuple, Any
 from enum import Enum
 
+try:
+    from openai import OpenAI
+except ImportError:
+    OpenAI = None
+
 
 # ============================================================================
 # 异常定义
@@ -603,29 +608,29 @@ class OxygenDynamicCognitionV26:
     - 认知偏差检测
     """
     
-    VERSION = "26.0.0-alpha.4"
+    VERSION = "26.0.0-alpha.5"
     
     def __init__(self, 
                  api_key: Optional[str] = None,
                  base_url: str = "https://api.openai.com/v1",
-                 model: str = "gpt-4",
-                 max_rounds: int = 10,
-                 confidence_threshold: float = 0.75,
-                 start_level: int = 2,
-                 max_level: int = 5,
-                 max_tokens: int = 4096,
+                 model: str = "gpt-3.5-turbo",
+                 max_rounds: int = 4,
+                 confidence_threshold: float = 0.80,
+                 start_level: int = 1,
+                 max_level: int = 4,
+                 max_tokens: int = 2048,
                  mock_mode: bool = False,
                  enable_cache: bool = True,
                  max_retries: int = 3,
-                 enable_tot: bool = True,
-                 enable_reflection: bool = True,
-                 enable_verification: bool = True,
-                 enable_self_consistency: bool = True,
-                 enable_bias_detection: bool = True,
-                 num_consistency_samples: int = 5,
-                 max_reflection_depth: int = 2,
-                 tot_branching_factor: int = 3,
-                 tot_max_depth: int = 3):
+                 enable_tot: bool = False,
+                 enable_reflection: bool = False,
+                 enable_verification: bool = False,
+                 enable_self_consistency: bool = False,
+                 enable_bias_detection: bool = False,
+                 num_consistency_samples: int = 3,
+                 max_reflection_depth: int = 1,
+                 tot_branching_factor: int = 2,
+                 tot_max_depth: int = 2):
         
         self.model = model
         self.max_rounds = max_rounds
@@ -648,21 +653,22 @@ class OxygenDynamicCognitionV26:
         
         # Mock模式
         self.mock_mode = mock_mode
-        if mock_mode:
-            self.llm = MockLLM()
+        self.api_key = api_key
+        self.base_url = base_url
+        self._client = None
+        if not mock_mode:
+            self._init_client()
         else:
-            self.llm = None  # 实际使用时初始化
-            self.api_key = api_key
-            self.base_url = base_url
-        
+            self.llm = MockLLM()
+
         # 缓存
         self.enable_cache = enable_cache
         if enable_cache:
             self.cache = SimpleCache(capacity=100)
-        
+
         # 重试
         self.max_retries = max_retries
-        
+
         # 预算
         self.budget = CognitiveBudget(
             max_tokens=max_tokens,
@@ -685,6 +691,49 @@ class OxygenDynamicCognitionV26:
     # 基础方法
     # ------------------------------------------------------------------------
     
+        # 预算追踪
+        self._last_token_usage = 0
+
+    def _init_client(self):
+        """初始化 OpenAI 兼容客户端"""
+        if OpenAI is None:
+            raise ImportError("未安装 openai 库，请运行：pip install openai")
+
+        import os as _os
+        api_key = self.api_key or _os.environ.get("OPENAI_API_KEY", _os.environ.get("OXYGEN_API_KEY", ""))
+        base_url = self.base_url or _os.environ.get("OPENAI_BASE_URL")
+
+        if not api_key:
+            raise ValueError("未设置 API Key")
+
+        client_kwargs = {"api_key": api_key}
+        if base_url:
+            client_kwargs["base_url"] = base_url
+
+        self._client = OpenAI(**client_kwargs)
+
+    def _real_api_call(self, messages: List[Dict], **kwargs) -> str:
+        """真实 API 调用"""
+        if self._client is None:
+            raise RuntimeError("API 客户端未初始化，请设置 api_key 或启用 mock_mode")
+
+        params = {
+            "model": self.model,
+            "messages": messages,
+        }
+        # 只传入支持的参数
+        for key in ["max_tokens", "temperature", "top_p", "frequency_penalty", "presence_penalty"]:
+            if key in kwargs:
+                params[key] = kwargs[key]
+
+        response = self._client.chat.completions.create(**params)
+
+        # 追踪 token 使用
+        if hasattr(response, "usage") and response.usage:
+            self._last_token_usage = response.usage.total_tokens
+
+        return response.choices[0].message.content.strip()
+
     def _call_llm(self, messages: List[Dict], **kwargs) -> str:
         """调用LLM（带重试和缓存）"""
         # 缓存检查
@@ -693,37 +742,35 @@ class OxygenDynamicCognitionV26:
             cached = self.cache.get(cache_key)
             if cached is not None:
                 return cached
-        
+
         # Mock模式
         if self.mock_mode:
             result = self.llm.chat_completion(messages, **kwargs)
             if self.enable_cache:
                 self.cache.put(cache_key, result)
             return result
-        
+
         # 实际API调用（带重试）
         last_error = None
         for attempt in range(self.max_retries):
             try:
-                # 这里应该是实际的API调用
-                # result = self._real_api_call(messages, **kwargs)
-                # 暂时用mock替代
-                if not hasattr(self, '_mock_fallback'):
-                    self._mock_fallback = MockLLM()
-                result = self._mock_fallback.chat_completion(messages, **kwargs)
-                
+                result = self._real_api_call(messages, **kwargs)
+
                 if self.enable_cache:
                     self.cache.put(cache_key, result)
-                
-                self.budget.use_tokens(kwargs.get('max_tokens', 100))
+
+                # 预算追踪
+                if hasattr(self, '_last_token_usage'):
+                    self.budget.use_tokens(self._last_token_usage)
+
                 return result
-                
+
             except Exception as e:
                 last_error = e
                 if attempt < self.max_retries - 1:
-                    time.sleep(2 ** attempt)  # 指数退避
+                    time.sleep(2 ** attempt)
                 continue
-        
+
         raise APICallError(f"API调用失败，已重试{self.max_retries}次: {last_error}")
     
     def quick_classify(self, question: str) -> str:
