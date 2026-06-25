@@ -608,7 +608,7 @@ class OxygenDynamicCognitionV26:
     - 认知偏差检测
     """
     
-    VERSION = "26.0.0-alpha.5"
+    VERSION = "26.0.0-alpha.6"
     
     def __init__(self, 
                  api_key: Optional[str] = None,
@@ -1616,48 +1616,100 @@ L5: 需要多路径探索或专家级知识
                 "confidence": current_confidence,
             })
         
-        # 6. v26.0 高级增强（如果启用）
+        # 6. v26.0 高级增强（如果启用）— Alpha 6: 修复死区逻辑
         if use_advanced:
-            # 反射
-            if self.enable_reflection and current_confidence < 0.9:
-                reflection = self.reflect(
-                    current_answer, question, 
-                    depth=min(self.max_reflection_depth, 2)
-                )
-                if reflection.revised_answer:
-                    current_answer = reflection.revised_answer
-                    # 重新评估
-                    current_confidence = self.assess_confidence(current_answer, question)["confidence"]
-                
-                self.cognition_log.append({
-                    "step": "reflection",
-                    "issues_found": len(reflection.issues_found),
-                    "improved": reflection.revised_answer is not None,
-                })
-            
-            # 验证链
-            if self.enable_verification and current_confidence < 0.95:
-                verification = self.chain_of_verification(current_answer, question)
-                self.cognition_log.append({
-                    "step": "verification",
-                    "verified": verification.verified,
-                    "steps": len(verification.verification_steps),
-                    "errors": len(verification.errors_found),
-                })
-                
-                # 如果验证失败且置信度不高，尝试自一致性
-                if not verification.verified and self.enable_self_consistency:
-                    consistency_result = self.self_consistency(
-                        question, self.num_consistency_samples
+            adv_rounds = 0
+            max_adv_rounds = 3  # Alpha 6: 熔断机制，防止无限循环
+
+            while adv_rounds < max_adv_rounds:
+                adv_rounds += 1
+                changed = False
+
+                # 反射
+                if self.enable_reflection and current_confidence < 0.9:
+                    reflection = self.reflect(
+                        current_answer, question,
+                        depth=min(self.max_reflection_depth, 2)
                     )
-                    current_answer = consistency_result["final_answer"]
-                    current_confidence = consistency_result["consensus_score"]
-                    
+                    if reflection.revised_answer:
+                        current_answer = reflection.revised_answer
+                        current_confidence = self.assess_confidence(
+                            current_answer, question
+                        )["confidence"]
+                        changed = True
+
                     self.cognition_log.append({
-                        "step": "self_consistency",
-                        "consensus_score": consistency_result["consensus_score"],
-                        "num_samples": consistency_result["num_samples"],
+                        "step": f"reflection_adv_{adv_rounds}",
+                        "issues_found": len(reflection.issues_found),
+                        "improved": reflection.revised_answer is not None,
                     })
+
+                # 验证链
+                if self.enable_verification and current_confidence < 0.95:
+                    verification = self.chain_of_verification(
+                        current_answer, question
+                    )
+                    self.cognition_log.append({
+                        "step": f"verification_adv_{adv_rounds}",
+                        "verified": verification.verified,
+                        "steps": len(verification.verification_steps),
+                        "errors": len(verification.errors_found),
+                    })
+
+                    # Alpha 6 fix: 验证通过但置信度仍低 → 仍尝试自一致性
+                    if verification.verified and current_confidence < 0.95 and self.enable_self_consistency:
+                        consistency_result = self.self_consistency(
+                            question, self.num_consistency_samples
+                        )
+                        current_answer = consistency_result["final_answer"]
+                        current_confidence = consistency_result["consensus_score"]
+                        changed = True
+
+                        self.cognition_log.append({
+                            "step": f"self_consistency_after_verify_{adv_rounds}",
+                            "consensus_score": consistency_result["consensus_score"],
+                            "trigger": "verified_but_low_confidence",
+                        })
+
+                    # 验证失败 → 尝试自一致性
+                    elif not verification.verified and self.enable_self_consistency:
+                        consistency_result = self.self_consistency(
+                            question, self.num_consistency_samples
+                        )
+                        current_answer = consistency_result["final_answer"]
+                        current_confidence = consistency_result["consensus_score"]
+                        changed = True
+
+                        self.cognition_log.append({
+                            "step": f"self_consistency_{adv_rounds}",
+                            "consensus_score": consistency_result["consensus_score"],
+                            "trigger": "verification_failed",
+                        })
+
+                        # Alpha 6 fix: 自一致性结果必须经过二次验证！
+                        if self.enable_verification:
+                            re_verify = self.chain_of_verification(
+                                current_answer, question
+                            )
+                            if re_verify.verified:
+                                current_confidence = max(
+                                    current_confidence,
+                                    self.assess_confidence(current_answer, question)["confidence"]
+                                )
+                                changed = True
+                            self.cognition_log.append({
+                                "step": f"re_verification_{adv_rounds}",
+                                "verified": re_verify.verified,
+                                "trigger": "post_self_consistency",
+                            })
+
+                # 无变化则跳出高级增强循环
+                if not changed:
+                    break
+
+                # Alpha 6: 每轮后重新评估，达标则提前退出
+                if current_confidence >= adaptive_threshold:
+                    break
         
         # 7. 最终整合
         if len(all_answers) > 1:
