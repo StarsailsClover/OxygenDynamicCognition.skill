@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-OxygenDynamicCognition v26.0 Alpha 4 - 高级动态认知推理引擎
+OxygenDynamicCognition v26.0 Alpha 7 - 高级动态认知推理引擎
 GitHub@StarsailsClover
 
 前沿技术集成：
@@ -593,7 +593,7 @@ class BiasDetector:
 
 class OxygenDynamicCognitionV26:
     """
-    OxygenDynamicCognition v26.0 Alpha 4 - 高级动态认知推理引擎
+    OxygenDynamicCognition v26.0 Alpha 7 - 高级动态认知推理引擎
     GitHub@StarsailsClover
     
     前沿技术：
@@ -608,7 +608,7 @@ class OxygenDynamicCognitionV26:
     - 认知偏差检测
     """
     
-    VERSION = "26.0.0-alpha.6"
+    VERSION = "26.0.0-alpha.7"
     
     def __init__(self, 
                  api_key: Optional[str] = None,
@@ -869,6 +869,25 @@ L5: 需要多路径探索或专家级知识
         
         return {"confidence": confidence / 100.0}
     
+    def _heuristic_confidence(self, answer: str, question: str) -> float:
+        """Alpha 7: 快速启发式置信度评估（不调用LLM）
+        
+        基于答案长度、问题类型匹配度快速估算置信度。
+        """
+        category = self.quick_classify(question)
+        base = {
+            "factual": 0.80, "reasoning": 0.70, "creative": 0.65,
+            "evaluation": 0.70, "math": 0.85, "coding": 0.80, "general": 0.70
+        }.get(category, 0.70)
+        
+        # 长度惩罚：太短可能不完整
+        if len(answer) < 20:
+            base *= 0.8
+        elif len(answer) > 500:
+            base = min(1.0, base + 0.05)
+        
+        return round(base, 2)
+
     def _assess_confidence_detailed(self, answer: str, question: str) -> Dict:
         """详细置信度评估（多维度）"""
         # 简化版：直接返回多维度评分
@@ -1579,14 +1598,23 @@ L5: 需要多路径探索或专家级知识
             "answer_length": len(current_answer),
         })
         
-        # 4. 置信度评估
-        confidence_result = self.assess_confidence(current_answer, question, detailed=True)
-        current_confidence = confidence_result["confidence"]
+        # 4. 置信度评估（Alpha 7: 启发式快速通道）
+        # 简单问题类别使用启发式方法跳过LLM评估，节省token
+        category = self.quick_classify(question)
+        heuristic_categories = {"factual", "math", "coding"}
+        if category in heuristic_categories and not self.mock_mode:
+            current_confidence = self._heuristic_confidence(current_answer, question)
+            confidence_source = "heuristic"
+        else:
+            confidence_result = self.assess_confidence(current_answer, question, detailed=True)
+            current_confidence = confidence_result["confidence"]
+            confidence_source = "llm"
         
         self.cognition_log.append({
             "step": "confidence_assessment",
             "confidence": current_confidence,
             "threshold": adaptive_threshold,
+            "source": confidence_source,
         })
         
         # 5. 动态推理循环
@@ -1729,6 +1757,10 @@ L5: 需要多路径探索或专家级知识
             "cognitive_level": current_level,
             "rounds": rounds + 1,
             "category": difficulty["category"],
+            "tool_decision": {
+                "needs_tool": tool_decision.needs_tool,
+                "tool_type": tool_decision.tool_type,
+            },
             "cognition_log": self.cognition_log,
             "metacognition": metacognition_report,
             "budget": self.budget.get_breakdown(),
@@ -1777,7 +1809,7 @@ def main():
     """命令行接口"""
     import argparse
     
-    parser = argparse.ArgumentParser(description="OxygenDynamicCognition v26.0 Alpha 4")
+    parser = argparse.ArgumentParser(description="OxygenDynamicCognition v26.0 Alpha 7")
     parser.add_argument("--question", "-q", help="问题内容")
     parser.add_argument("--model", default="gpt-4", help="模型名称")
     parser.add_argument("--threshold", type=float, default=0.75, help="置信度阈值")
