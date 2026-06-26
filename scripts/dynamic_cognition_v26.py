@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-OxygenDynamicCognition v26.0 Alpha 7 - 高级动态认知推理引擎
+OxygenDynamicCognition v26.0 Alpha 8 - 高级动态认知推理引擎
 GitHub@StarsailsClover
 
 前沿技术集成：
@@ -15,6 +15,8 @@ GitHub@StarsailsClover
 - 元认知监控（Metacognitive Monitoring）
 - 内部独白（Inner Monologue）
 - 认知偏差检测（Cognitive Bias Detection）
+
+Modified by StarsailsClover - v26.0-alpha.8: Backend abstraction, agent-native mode, context isolation, L5 parallelism, bug fixes
 """
 
 import os
@@ -25,13 +27,23 @@ import random
 import hashlib
 from collections import defaultdict, OrderedDict
 from dataclasses import dataclass, field
-from typing import Optional, List, Dict, Tuple, Any
+from typing import Optional, List, Dict, Tuple, Any, Callable
 from enum import Enum
+
+# Modified by StarsailsClover - v26.0-alpha.8: For L5 parallel reasoning
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 try:
     from openai import OpenAI
 except ImportError:
     OpenAI = None
+
+# Modified by StarsailsClover - v26.0-alpha.8: Import backend abstraction layer
+# Support both package import and direct script execution
+try:
+    from .llm_backend import LLMBackend, BackendFactory, AgentNativeBackend
+except ImportError:
+    from llm_backend import LLMBackend, BackendFactory, AgentNativeBackend
 
 
 # ============================================================================
@@ -593,7 +605,7 @@ class BiasDetector:
 
 class OxygenDynamicCognitionV26:
     """
-    OxygenDynamicCognition v26.0 Alpha 7 - 高级动态认知推理引擎
+    OxygenDynamicCognition v26.0 Alpha 8 - 高级动态认知推理引擎
     GitHub@StarsailsClover
     
     前沿技术：
@@ -606,9 +618,11 @@ class OxygenDynamicCognitionV26:
     - 渐进式深化
     - 元认知监控
     - 认知偏差检测
+    
+    Modified by StarsailsClover - v26.0-alpha.8: Added backend abstraction, agent-native mode, context isolation, L5 parallelism, bug fixes
     """
     
-    VERSION = "26.0.0-alpha.7"
+    VERSION = "26.0.0-alpha.8"
     
     def __init__(self, 
                  api_key: Optional[str] = None,
@@ -630,7 +644,11 @@ class OxygenDynamicCognitionV26:
                  num_consistency_samples: int = 3,
                  max_reflection_depth: int = 1,
                  tot_branching_factor: int = 2,
-                 tot_max_depth: int = 2):
+                 tot_max_depth: int = 2,
+                 # Modified by StarsailsClover - v26.0-alpha.8: New parameters for backend abstraction
+                 llm_callable: Optional[callable] = None,
+                 context_mode: str = "shared",
+                 use_mock: bool = False):
         
         self.model = model
         self.max_rounds = max_rounds
@@ -651,15 +669,26 @@ class OxygenDynamicCognitionV26:
         self.tot_branching_factor = tot_branching_factor
         self.tot_max_depth = tot_max_depth
         
-        # Mock模式
-        self.mock_mode = mock_mode
+        # Modified by StarsailsClover - v26.0-alpha.8: Store max_tokens config for budget reset bug fix
+        self._max_tokens_budget_config = max_tokens
+        
+        # Modified by StarsailsClover - v26.0-alpha.8: Initialize backend using factory pattern
+        # Backward compatibility: mock_mode parameter maps to use_mock
+        self._use_mock = use_mock or mock_mode
+        self._backend = BackendFactory.create_backend(
+            use_mock=self._use_mock,
+            llm_callable=llm_callable,
+            api_key=api_key,
+            base_url=base_url,
+            model=model,
+            context_mode=context_mode,
+            max_retries=max_retries,
+        )
+        
+        # Keep for backward compatibility
+        self.mock_mode = self._use_mock
         self.api_key = api_key
         self.base_url = base_url
-        self._client = None
-        if not mock_mode:
-            self._init_client()
-        else:
-            self.llm = MockLLM()
 
         # 缓存
         self.enable_cache = enable_cache
@@ -686,56 +715,63 @@ class OxygenDynamicCognitionV26:
             "bias_checks_done": 0,
             "cognitive_effort_score": 0.0,
         }
+        
+        # Modified by StarsailsClover - v26.0-alpha.8: Token usage tracking
+        self._last_token_usage = 0
     
     # ------------------------------------------------------------------------
     # 基础方法
     # ------------------------------------------------------------------------
+
+    # Modified by StarsailsClover - v26.0-alpha.8: New methods for agent-native mode
+    def set_llm_callable(self, llm_callable: callable):
+        """Set the LLM callable for agent-native mode.
+        
+        Args:
+            llm_callable: Callable that takes messages list and returns string response
+        """
+        if isinstance(self._backend, AgentNativeBackend):
+            self._backend.set_llm_callable(llm_callable)
+        else:
+            # Switch to agent-native backend
+            self._backend = AgentNativeBackend(
+                llm_callable=llm_callable,
+                context_mode="shared",
+            )
+            self.mock_mode = False
+            self._use_mock = False
     
-        # 预算追踪
-        self._last_token_usage = 0
-
-    def _init_client(self):
-        """初始化 OpenAI 兼容客户端"""
-        if OpenAI is None:
-            raise ImportError("未安装 openai 库，请运行：pip install openai")
-
-        import os as _os
-        api_key = self.api_key or _os.environ.get("OPENAI_API_KEY", _os.environ.get("OXYGEN_API_KEY", ""))
-        base_url = self.base_url or _os.environ.get("OPENAI_BASE_URL")
-
-        if not api_key:
-            raise ValueError("未设置 API Key")
-
-        client_kwargs = {"api_key": api_key}
-        if base_url:
-            client_kwargs["base_url"] = base_url
-
-        self._client = OpenAI(**client_kwargs)
-
-    def _real_api_call(self, messages: List[Dict], **kwargs) -> str:
-        """真实 API 调用"""
-        if self._client is None:
-            raise RuntimeError("API 客户端未初始化，请设置 api_key 或启用 mock_mode")
-
-        params = {
-            "model": self.model,
-            "messages": messages,
-        }
-        # 只传入支持的参数
-        for key in ["max_tokens", "temperature", "top_p", "frequency_penalty", "presence_penalty"]:
-            if key in kwargs:
-                params[key] = kwargs[key]
-
-        response = self._client.chat.completions.create(**params)
-
-        # 追踪 token 使用
-        if hasattr(response, "usage") and response.usage:
-            self._last_token_usage = response.usage.total_tokens
-
-        return response.choices[0].message.content.strip()
+    def set_context_mode(self, mode: str):
+        """Set context isolation mode.
+        
+        Args:
+            mode: "shared" or "isolated"
+        """
+        if isinstance(self._backend, AgentNativeBackend):
+            self._backend.set_context_mode(mode)
+    
+    def set_agent_context(self, context: List[Dict]):
+        """Update agent context for shared context mode.
+        
+        Args:
+            context: List of message dicts with role and content
+        """
+        if isinstance(self._backend, AgentNativeBackend):
+            self._backend.set_agent_context(context)
+    
+    def get_backend_info(self) -> Dict[str, str]:
+        """Get information about the current backend.
+        
+        Returns:
+            Dict with backend type, model, and availability info
+        """
+        return self._backend.get_backend_info()
 
     def _call_llm(self, messages: List[Dict], **kwargs) -> str:
-        """调用LLM（带重试和缓存）"""
+        """Call LLM through backend abstraction (with caching and budget tracking).
+        
+        Modified by StarsailsClover - v26.0-alpha.8: Uses backend abstraction instead of direct API calls
+        """
         # 缓存检查
         if self.enable_cache:
             cache_key = hashlib.md5(json.dumps(messages, sort_keys=True).encode()).hexdigest()
@@ -743,35 +779,28 @@ class OxygenDynamicCognitionV26:
             if cached is not None:
                 return cached
 
-        # Mock模式
-        if self.mock_mode:
-            result = self.llm.chat_completion(messages, **kwargs)
-            if self.enable_cache:
-                self.cache.put(cache_key, result)
-            return result
+        # Call through backend
+        try:
+            result = self._backend.chat_completion(messages, **kwargs)
+        except Exception as e:
+            raise APICallError(f"LLM call failed: {e}")
 
-        # 实际API调用（带重试）
-        last_error = None
-        for attempt in range(self.max_retries):
-            try:
-                result = self._real_api_call(messages, **kwargs)
+        # Cache result
+        if self.enable_cache:
+            self.cache.put(cache_key, result)
 
-                if self.enable_cache:
-                    self.cache.put(cache_key, result)
+        # Token budget tracking
+        try:
+            estimated_tokens = self._backend.estimate_tokens(
+                "".join(m.get("content", "") for m in messages) + result
+            )
+            self._last_token_usage = estimated_tokens
+            self.budget.use_tokens(estimated_tokens)
+        except Exception:
+            # If token estimation fails, use a conservative estimate
+            self.budget.use_tokens(100)
 
-                # 预算追踪
-                if hasattr(self, '_last_token_usage'):
-                    self.budget.use_tokens(self._last_token_usage)
-
-                return result
-
-            except Exception as e:
-                last_error = e
-                if attempt < self.max_retries - 1:
-                    time.sleep(2 ** attempt)
-                continue
-
-        raise APICallError(f"API调用失败，已重试{self.max_retries}次: {last_error}")
+        return result
     
     def quick_classify(self, question: str) -> str:
         """本地快速分类问题"""
@@ -1495,6 +1524,112 @@ L5: 需要多路径探索或专家级知识
         return self._think_l4(question, context)
     
     # ------------------------------------------------------------------------
+    # Modified by StarsailsClover - v26.0-alpha.8: L5 Parallel Reasoning
+    # ------------------------------------------------------------------------
+    
+    def collaborative_reasoning(self, question: str, parallel: bool = False) -> Dict:
+        """L5 Collaborative reasoning with multiple independent paths.
+        
+        Modified by StarsailsClover - v26.0-alpha.8: Added parallel execution support
+        
+        Args:
+            question: The question to reason about
+            parallel: If True, use thread pool for parallel execution
+            
+        Returns:
+            Dict with paths, final_answer, consensus_score, and parallel flag
+        """
+        # Define three reasoning paths
+        path_configs = [
+            ("forward", "正向推导：从已知条件出发，逐步推导出结论"),
+            ("backward", "逆向验证：从结论出发，反向验证是否成立"),
+            ("boundary", "边界分析：分析问题的边界条件和极端情况"),
+        ]
+        
+        def run_path(path_id: str, description: str) -> Dict:
+            """Run a single reasoning path."""
+            try:
+                prompt = f"""请使用{description}的方式回答以下问题：
+
+问题：{question}
+
+请给出完整的推理过程和最终结论。"""
+                
+                answer = self._call_llm([{"role": "user", "content": prompt}])
+                
+                # Quick confidence estimate
+                confidence = self._heuristic_confidence(answer, question)
+                
+                return {
+                    "path_id": path_id,
+                    "approach": description,
+                    "answer": answer,
+                    "confidence": confidence,
+                    "success": True,
+                }
+            except Exception as e:
+                return {
+                    "path_id": path_id,
+                    "approach": description,
+                    "answer": "",
+                    "confidence": 0.0,
+                    "success": False,
+                    "error": str(e),
+                }
+        
+        # Execute paths
+        path_results = []
+        
+        if parallel:
+            try:
+                with ThreadPoolExecutor(max_workers=3) as executor:
+                    futures = {
+                        executor.submit(run_path, pid, desc): pid
+                        for pid, desc in path_configs
+                    }
+                    
+                    for future in as_completed(futures):
+                        result = future.result()
+                        path_results.append(result)
+                        
+            except Exception as e:
+                # Fallback to serial execution
+                path_results = []
+                for pid, desc in path_configs:
+                    path_results.append(run_path(pid, desc))
+        else:
+            # Serial execution
+            for pid, desc in path_configs:
+                path_results.append(run_path(pid, desc))
+        
+        # Filter successful paths
+        successful_paths = [p for p in path_results if p.get("success", False)]
+        
+        if not successful_paths:
+            return {
+                "paths": path_results,
+                "final_answer": "所有推理路径均失败",
+                "consensus_score": 0.0,
+                "parallel": parallel,
+                "successful_paths": 0,
+            }
+        
+        # Simple consensus: use the highest confidence answer
+        best_path = max(successful_paths, key=lambda x: x["confidence"])
+        
+        # Calculate consensus score (simplified)
+        avg_confidence = sum(p["confidence"] for p in successful_paths) / len(successful_paths)
+        
+        return {
+            "paths": path_results,
+            "final_answer": best_path["answer"],
+            "consensus_score": avg_confidence,
+            "parallel": parallel,
+            "successful_paths": len(successful_paths),
+            "best_path_id": best_path["path_id"],
+        }
+    
+    # ------------------------------------------------------------------------
     # 认知升级
     # ------------------------------------------------------------------------
     
@@ -1553,11 +1688,14 @@ L5: 需要多路径探索或专家级知识
         """主推理循环
         
         v26.0 增强版：集成多种前沿技术
+        
+        Modified by StarsailsClover - v26.0-alpha.8: Fixed token budget reset bug, added backend_info to result
         """
         # 重置状态
         self.cognition_log = []
+        # Modified by StarsailsClover - v26.0-alpha.8: Use stored config value instead of current budget value
         self.budget = CognitiveBudget(
-            max_tokens=self.budget.max_tokens,
+            max_tokens=self._max_tokens_budget_config,
             max_rounds=self.max_rounds,
         )
         self.metacognition = {
@@ -1751,6 +1889,7 @@ L5: 需要多路径探索或专家级知识
         # 9. 元认知报告
         metacognition_report = self.get_metacognition_report()
         
+        # Modified by StarsailsClover - v26.0-alpha.8: Add backend_info to result
         return {
             "answer": final_answer,
             "confidence": final_confidence,
@@ -1765,6 +1904,7 @@ L5: 需要多路径探索或专家级知识
             "metacognition": metacognition_report,
             "budget": self.budget.get_breakdown(),
             "version": self.VERSION,
+            "backend_info": self.get_backend_info(),
         }
     
     # ------------------------------------------------------------------------
@@ -1809,7 +1949,8 @@ def main():
     """命令行接口"""
     import argparse
     
-    parser = argparse.ArgumentParser(description="OxygenDynamicCognition v26.0 Alpha 7")
+    # Modified by StarsailsClover - v26.0-alpha.8: Updated version in CLI
+    parser = argparse.ArgumentParser(description="OxygenDynamicCognition v26.0 Alpha 8")
     parser.add_argument("--question", "-q", help="问题内容")
     parser.add_argument("--model", default="gpt-4", help="模型名称")
     parser.add_argument("--threshold", type=float, default=0.75, help="置信度阈值")

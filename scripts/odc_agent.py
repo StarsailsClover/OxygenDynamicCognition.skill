@@ -1,127 +1,193 @@
 #!/usr/bin/env python3
 """
-Oxygen Dynamic Cognition v2 - Agent Integration Module
-为 OpenClaw Agent 提供动态认知能力的集成模块。
+Oxygen Dynamic Cognition v26 - Agent Integration Module
 
-使用方式：
-1. 作为 Python 模块导入
-2. 通过 CLI 调用
-3. 通过 JSON-RPC 与 Agent 通信
+Provides dynamic cognition capabilities for Agent frameworks.
+Supports both API-based and agent-native modes.
+
+Modified by StarsailsClover - v26.0-alpha.8: Added v26 engine, agent-native mode, context isolation, and [TAG] output format
 """
-
 import json
 import sys
 from pathlib import Path
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Callable
 
 script_dir = Path(__file__).parent
 sys.path.insert(0, str(script_dir))
 
-from dynamic_cognition_v2 import EnhancedCognitionEngine
+# Modified by StarsailsClover - v26.0-alpha.8: Use v26 engine by default
+from dynamic_cognition_v26 import OxygenDynamicCognitionV26 as EnhancedCognitionEngine
+
+
+def create_skill_engine(
+    llm_callable: Optional[Callable] = None,
+    context_mode: str = "shared",
+    **kwargs
+) -> EnhancedCognitionEngine:
+    """Create engine in skill/agent-native mode (recommended entry point).
+    
+    Modified by StarsailsClover - v26.0-alpha.8: Factory function for agent-native mode
+    
+    Args:
+        llm_callable: Callable that takes messages list and returns string response
+        context_mode: "shared" or "isolated"
+        **kwargs: Additional engine parameters
+        
+    Returns:
+        OxygenDynamicCognitionV26 engine instance
+    """
+    return EnhancedCognitionEngine(
+        llm_callable=llm_callable,
+        context_mode=context_mode,
+        **kwargs
+    )
 
 
 def run_cognition(
     question: str,
-    model: str = "stepfun_api/step-3.7-flash",
+    model: str = "gpt-3.5-turbo",
     base_url: Optional[str] = None,
-    threshold: int = 80,
+    api_key: Optional[str] = None,
+    threshold: float = 0.80,
     max_rounds: int = 4,
-    start_level: str = "auto",
+    start_level: int = 1,
     verbose: bool = True,
     context: Optional[str] = None,
-    budget: int = 16000,
+    budget: int = 2048,
+    use_mock: bool = False,
+    llm_callable: Optional[Callable] = None,
+    context_mode: str = "shared",
+    enable_tot: bool = False,
+    enable_reflection: bool = False,
+    enable_verification: bool = False,
+    enable_self_consistency: bool = False,
 ) -> Dict[str, Any]:
     """
-    运行动态认知推理（Agent 集成接口）
-
+    Run dynamic cognition reasoning (Agent integration interface).
+    
+    Modified by StarsailsClover - v26.0-alpha.8: Updated for v26 engine with backend abstraction
+    
     Args:
-        question: 要回答的问题
-        model: 使用的模型
-        base_url: API 基础 URL
-        threshold: 置信度阈值
-        max_rounds: 最大思考轮次
-        start_level: 起始认知等级
-        verbose: 详细输出
-        context: 上下文信息
-        budget: Token 预算
-
+        question: Question to answer
+        model: Model name (for API mode)
+        base_url: API base URL
+        api_key: API key (for API mode)
+        threshold: Confidence threshold (0-1)
+        max_rounds: Maximum thinking rounds
+        start_level: Starting cognitive level (1-5)
+        verbose: Verbose output
+        context: Context information
+        budget: Token budget
+        use_mock: Use mock mode for testing
+        llm_callable: LLM callable for agent-native mode
+        context_mode: Context isolation mode ("shared" or "isolated")
+        enable_tot: Enable Tree of Thoughts
+        enable_reflection: Enable reflection mechanism
+        enable_verification: Enable Chain of Verification
+        enable_self_consistency: Enable self-consistency
+        
     Returns:
-        推理结果字典
+        Reasoning result dictionary
     """
     engine = EnhancedCognitionEngine(
         model=model,
         base_url=base_url,
+        api_key=api_key,
         confidence_threshold=threshold,
         max_rounds=max_rounds,
         start_level=start_level,
-        verbose=verbose,
-        max_tokens_budget=budget,
-        context=context,
+        max_tokens=budget,
+        use_mock=use_mock,
+        llm_callable=llm_callable,
+        context_mode=context_mode,
+        enable_tot=enable_tot,
+        enable_reflection=enable_reflection,
+        enable_verification=enable_verification,
+        enable_self_consistency=enable_self_consistency,
     )
-
-    return engine.run(question)
+    return engine.run(question, context=context)
 
 
 def format_result_for_agent(result: Dict[str, Any]) -> str:
-    """将推理结果格式化为 Agent 友好的输出"""
-
+    """Format reasoning result for agent-friendly output.
+    
+    Modified by StarsailsClover - v26.0-alpha.8: Changed from emoji to [TAG] format for cross-platform compatibility
+    """
     lines = []
-    level_emoji = {
-        "L1": "⚡", "L2": "📋", "L3": "🔍",
-        "L4": "🔬", "L5": "🌐",
+    
+    level_tags = {
+        1: "[L1]", 2: "[L2]", 3: "[L3]",
+        4: "[L4]", 5: "[L5]",
     }
-    initial_level = result.get("initial_level", "L2")
-    emoji = level_emoji.get(initial_level, "🧠")
-
-    lines.append(f"{emoji} **动态认知 [{initial_level}]**")
-    lines.append(f"📊 置信度：{result['final_confidence']}/100")
-    lines.append(f"🔄 轮次：{result['total_rounds']}")
-
-    if result.get("used_l5"):
-        lines.append(f"🌐 L5 协同：已启用")
-
-    if result.get("tool_calls"):
-        tools = [t["tools"] for t in result["tool_calls"]]
-        lines.append(f"🔧 工具调用：{tools}")
-
-    lines.append(f"💰 Token：{result['total_tokens']}（{result.get('token_budget_used', '?')}）")
-    lines.append(f"⏱️  耗时：{result.get('total_time', '?')}s")
+    
+    cognitive_level = result.get("cognitive_level", 2)
+    level_tag = level_tags.get(cognitive_level, "[L?]")
+    
+    lines.append(f"{level_tag} [Dynamic Cognition]")
+    lines.append(f"[Confidence] {result['confidence']:.1%}")
+    lines.append(f"[Rounds] {result['rounds']}")
+    lines.append(f"[Category] {result.get('category', 'general')}")
+    
+    if result.get("backend_info"):
+        backend = result["backend_info"]
+        lines.append(f"[Backend] {backend.get('type', 'unknown')}")
+    
+    budget = result.get("budget", {})
+    if budget:
+        lines.append(f"[Tokens] {budget.get('tokens_used', 0)}/{budget.get('max_tokens', 0)}")
+    
     lines.append("")
     lines.append("---")
     lines.append("")
-    lines.append(result["final_answer"])
-
+    lines.append(result["answer"])
+    
     return "\n".join(lines)
 
 
 def main():
-    """CLI 入口"""
+    """CLI entry point"""
     import argparse
-
-    parser = argparse.ArgumentParser(description="ODC v2 Agent 集成接口")
-    parser.add_argument("question", help="问题")
-    parser.add_argument("--model", default=None, help="模型名称")
-    parser.add_argument("--threshold", type=int, default=80)
-    parser.add_argument("--rounds", type=int, default=4)
-    parser.add_argument("--level", default="auto")
-    parser.add_argument("--context", default=None)
-    parser.add_argument("--budget", type=int, default=16000)
-    parser.add_argument("--json", action="store_true")
-    parser.add_argument("--quiet", action="store_true")
-
+    
+    parser = argparse.ArgumentParser(description="ODC v26 Agent Integration Interface")
+    parser.add_argument("question", help="Question to answer")
+    parser.add_argument("--model", default=None, help="Model name")
+    parser.add_argument("--base-url", default=None, help="API base URL")
+    parser.add_argument("--api-key", default=None, help="API key")
+    parser.add_argument("--threshold", type=float, default=0.80, help="Confidence threshold")
+    parser.add_argument("--rounds", type=int, default=4, help="Maximum rounds")
+    parser.add_argument("--level", type=int, default=1, help="Starting level")
+    parser.add_argument("--context", default=None, help="Context")
+    parser.add_argument("--budget", type=int, default=2048, help="Token budget")
+    parser.add_argument("--mock", action="store_true", help="Mock mode")
+    parser.add_argument("--json", action="store_true", help="JSON output")
+    parser.add_argument("--quiet", action="store_true", help="Quiet mode")
+    
+    # v26 features
+    parser.add_argument("--enable-tot", action="store_true", help="Enable Tree of Thoughts")
+    parser.add_argument("--enable-reflection", action="store_true", help="Enable reflection")
+    parser.add_argument("--enable-verification", action="store_true", help="Enable verification chain")
+    parser.add_argument("--enable-consistency", action="store_true", help="Enable self-consistency")
+    
     args = parser.parse_args()
-
+    
     result = run_cognition(
         question=args.question,
-        model=args.model,
+        model=args.model or "gpt-3.5-turbo",
+        base_url=args.base_url,
+        api_key=args.api_key,
         threshold=args.threshold,
         max_rounds=args.rounds,
         start_level=args.level,
         verbose=not args.quiet,
         context=args.context,
         budget=args.budget,
+        use_mock=args.mock,
+        enable_tot=args.enable_tot,
+        enable_reflection=args.enable_reflection,
+        enable_verification=args.enable_verification,
+        enable_self_consistency=args.enable_consistency,
     )
-
+    
     if args.json:
         print(json.dumps(result, ensure_ascii=False, indent=2))
     else:
